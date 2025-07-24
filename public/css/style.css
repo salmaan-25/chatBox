@@ -1,0 +1,191 @@
+/* ===============================
+   Root Variables (iPortfolio-like)
+================================== */
+:root {
+  --default-font: "Roboto", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif;
+  --heading-font: "Raleway", sans-serif;
+  --accent-color: #149ddd;
+  --background-color: #ffffff;
+  --default-color: #272829;
+  --heading-color: #050d18;
+  --contrast-color: #ffffff;
+}
+
+/* ===============================
+   Base Styles
+================================== */
+body {
+  font-family: var(--default-font);
+  padding: 20px;
+  background: #f4f4f4;
+  color: var(--default-color);
+  text-align: center;
+  margin: 0;
+}
+
+.container {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 10px;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 0 10px rgba(0,0,0,0.1);
+}
+
+h1, h2, h3 {
+  font-family: var(--heading-font);
+  color: var(--heading-color);
+}
+
+/* ===============================
+   Forms & Buttons
+================================== */
+form {
+  margin: 10px auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+input {
+  flex: 1 1 60%;
+  padding: 8px;
+  min-width: 200px;
+  max-width: 400px;
+}
+
+button {
+  padding: 10px;
+  background: var(--accent-color);
+  border: none;
+  color: white;
+  cursor: pointer;
+  border-radius: 5px;
+  width: 100%;
+  max-width: 150px;
+  margin-top: 10px;
+}
+
+button:hover {
+  background: #0f82c9;
+}
+
+/* ===============================
+   Messages & Media
+================================== */
+#messages {
+  height: 300px;
+  overflow-y: auto;
+  border: 1px solid #ccc;
+  padding: 10px;
+  margin: 15px auto;
+  background: white;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.msg {
+  margin: 5px 0;
+}
+
+.msg strong {
+  color: var(--accent-color);
+}
+
+/* ===============================
+   Voice Recording Button
+================================== */
+#record-btn {
+  background-color: #ff4d4d;
+  color: white;
+  border: none;
+  width: 100%;
+  max-width: 150px;
+  height: 50px;
+  cursor: pointer;
+  border-radius: 5px;
+  margin-top: 10px;
+}
+
+#record-btn:hover {
+  background-color: #c63434;
+}
+
+/* ===============================
+   Modal Popup
+================================== */
+.modal {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.modal-content {
+  background: white;
+  padding: 20px;
+  border-radius: 10px;
+  text-align: center;
+  width: 90%;
+  max-width: 350px;
+}
+
+.hidden {
+  display: none;
+}
+
+.error {
+  color: red;
+}
+
+/* ===============================
+   Profile Picture
+================================== */
+.profile-pic {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  vertical-align: middle;
+  margin-left: 5px;
+}
+
+/* ===============================
+   Responsive Styles
+================================== */
+@media (max-width: 768px) {
+  body {
+    padding: 10px;
+  }
+
+  .container {
+    padding: 15px;
+    width: 100%;
+  }
+
+  form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  input,
+  button,
+  #record-btn {
+    width: 100%;
+    max-width: none;
+    margin: 10px 0;
+  }
+
+  #messages {
+    height: 250px;
+    font-size: 14px;
+  }
+
+  .modal-content {
+    width: 95%;
+  }
+}

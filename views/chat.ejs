@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chat Room - <%= roomId %></title>
+  <link rel="stylesheet" href="/css/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: Arial, sans-serif; background: #f0f2f5; padding: 20px; }
+    #messages { border: 1px solid #ccc; height: 300px; overflow-y: scroll; padding: 10px; background: #fff; }
+    .msg { margin: 5px 0; }
+    .msg strong { color: #2d89ef; }
+    .profile-pic { width: 24px; height: 24px; border-radius: 50%; vertical-align: middle; margin-right: 5px; }
+    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); justify-content: center; align-items: center; z-index: 1000; }
+    .modal-content { background: white; padding: 20px; border-radius: 5px; text-align: center; }
+    .modal button { margin: 10px; padding: 5px 10px; }
+    .modal.show { display: flex; }
+  </style>
+</head>
+<body>
+  <div class="container">
+  <img src="/images/chit chats.png" alt="Chat Logo" style="height: 100px; width: 100px; border: 2px solid black; border-radius: 250px; ">
+  <h1>ChatBox</h1>
+  <h2>Room: <%= roomId %></h2>
+  <p>Welcome, <strong><%= user.displayName || user.username %></strong> 
+    <% if (user.profilePic) { %>
+      <img src="<%= user.profilePic %>" class="profile-pic">
+    <% } %>
+  </p>
+
+  <div id="messages"></div>
+
+  <form id="chat-form"  >
+     <div class="input-group">
+    <input id="msg" autocomplete="off" placeholder="Type a message..." />
+    <button>Send📩</button></div>
+  </form>
+
+  <form id="media-form" enctype="multipart/form-data" >
+    <input type="file" id="media-input" name="media" accept="image/*,audio/*" hidden>
+    <button type="button" onclick="document.getElementById('media-input').click()">send image📎</button>
+     
+  </form>
+ <button style=" background-color: #2d89ef;" id="record-btn">send voice🎤</button>
+
+  <% if (isAdmin) { %>
+    <button id="close-room-btn">Close Room</button>
+  <% } %>
+
+  <!-- Approval Modal -->
+  <div id="approvalModal" class="modal">
+    <div class="modal-content">
+      <p id="approvalMessage">User wants to join</p>
+      <button id="approveBtn">Approve</button>
+      <button id="rejectBtn">Reject</button>
+    </div>
+  </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const username = "<%= user.username %>";
+    const roomId = "<%= roomId %>";
+    const isAdmin = <%= isAdmin %>;
+
+    // Join room
+    socket.emit('join-room', { roomId, username });
+
+    const messages = document.getElementById('messages');
+    const form = document.getElementById('chat-form');
+    const input = document.getElementById('msg');
+
+    // Load existing messages from localStorage (in-memory simulation)
+    const stored = sessionStorage.getItem('chat_' + roomId);
+    if (stored) messages.innerHTML = stored;
+
+    // Receive message
+    socket.on('message', data => {
+      const item = document.createElement('div');
+      item.classList.add('msg');
+      item.innerHTML = `<strong>${data.user}:</strong> ${data.text}`;
+      messages.appendChild(item);
+      messages.scrollTop = messages.scrollHeight;
+      sessionStorage.setItem('chat_' + roomId, messages.innerHTML);
+    });
+
+    // Send message
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const msg = input.value.trim();
+      if (msg) {
+        socket.emit('chat-message', msg);
+        input.value = '';
+      }
+    });
+
+    // Media upload
+    const mediaInput = document.getElementById('media-input');
+    const mediaForm = document.getElementById('media-form');
+
+    mediaInput.addEventListener('change', () => {
+      const formData = new FormData(mediaForm);
+      fetch('/upload', {
+        method: 'POST',
+        body: formData
+      })
+      .then(res => res.json())
+      .then(data => {
+        const filePath = data.filePath;
+        const ext = filePath.split('.').pop();
+        let msg = '';
+        if (['jpg', 'jpeg', 'png', 'gif'].includes(ext)) {
+          msg = `<img src="${filePath}" style="max-width:200px;">`;
+        } else if (['mp3', 'wav', 'ogg', 'webm'].includes(ext)) {
+          msg = `<audio controls src="${filePath}"></audio>`;
+        }
+        if (msg) socket.emit('chat message', msg);
+      });
+    });
+
+    // Voice recording
+    let mediaRecorder;
+    let audioChunks = [];
+    const recordBtn = document.getElementById('record-btn');
+
+    recordBtn.addEventListener('click', async () => {
+      if (mediaRecorder && mediaRecorder.state === "recording") {
+        mediaRecorder.stop();
+        recordBtn.textContent = "voice 🎤";
+      } else {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          audioChunks = [];
+          const formData = new FormData();
+          formData.append('media', audioBlob, 'voice.webm');
+          fetch('/upload', {
+            method: 'POST',
+            body: formData
+          })
+          .then(res => res.json())
+          .then(data => {
+            const audioURL = data.filePath;
+            socket.emit('chat message', `<audio controls src="${audioURL}"></audio>`);
+          });
+        };
+        mediaRecorder.start();
+        recordBtn.textContent = "⏹️ Recording...";
+      }
+    });
+
+    // Admin approves join requests via modal popup
+    if (isAdmin) {
+      socket.on('join-request', ({ roomId, username }) => {
+        const modal = document.getElementById('approvalModal');
+        const message = document.getElementById('approvalMessage');
+        const approveBtn = document.getElementById('approveBtn');
+        const rejectBtn = document.getElementById('rejectBtn');
+
+        message.textContent = `User "${username}" wants to join the room. Approve?`;
+        modal.classList.add('show');
+
+        approveBtn.onclick = () => {
+          socket.emit('approve-user', { roomId, username });
+          modal.classList.remove('show');
+        };
+
+        rejectBtn.onclick = () => {
+          socket.emit('reject-user', { roomId, username });
+          modal.classList.remove('show');
+        };
+      });
+    }
+
+    // Close room
+    document.getElementById('close-room-btn')?.addEventListener('click', () => {
+      if (confirm('Are you sure you want to close this room?')) {
+        socket.emit('close-room', roomId);
+      }
+    });
+
+    socket.on('room-closed', () => {
+      alert("Room has been closed by the admin.");
+      sessionStorage.removeItem('chat_' + roomId);
+      window.location.href = '/chat';
+    });
+
+  </script>
+</body>
+</html>
