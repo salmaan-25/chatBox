@@ -13,7 +13,6 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-const { Pool } = require('pg');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
