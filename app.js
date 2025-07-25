@@ -1,57 +1,59 @@
 const express = require('express');
 const session = require('express-session');
-const SQLiteStore = require('connect-sqlite3')(session);
+const pgSession = require('connect-pg-simple')(session);
+const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const { Server } = require('socket.io');
 const http = require('http');
-const fs = require('fs');
-const path = require('path');
 const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: "*", // Adjust to your frontend URL if needed
-    methods: ["GET", "POST"]
-  }
+const io = new Server(server);
+
+const pool = new Pool({
+  user: 'postgres',
+  host: 'localhost',
+  database: 'grpchat',
+  password: 'salmaan@2004',
+  port: 5432
 });
 
-// Ensure uploads directory exists
-const uploadsDir = path.join(__dirname, 'public/uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-
-const USERS_FILE = path.join(__dirname, 'users.json');
-let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : [];
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
-});
-const upload = multer({ storage });
-
-// View & Middleware
+// Middleware
 app.set('view engine', 'ejs');
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
 
-// Sessions
 app.use(session({
-  store: new SQLiteStore(),
+  store: new pgSession({ pool }),
   secret: 'secret-key',
   resave: false,
-  saveUninitialized: false
+  saveUninitialized: false,
 }));
 
-// Force HTTPS (Render specific fix)
-app.use((req, res, next) => {
-  if (req.headers['x-forwarded-proto'] !== 'https' && process.env.NODE_ENV === 'production') {
-    return res.redirect('https://' + req.headers.host + req.url);
-  }
-  next();
+// Media upload setup
+const uploadDir = path.join(__dirname, 'public/uploads');
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
 });
+const upload = multer({ storage });
+
+// Room logic
+let connectedUsers = {};
+let rooms = {};
+let roomMessages = {};
+
+function findSocketByUsername(username) {
+  const socketId = connectedUsers[username];
+  return socketId ? io.sockets.sockets.get(socketId) : null;
+}
 
 // Routes
 app.get('/', (req, res) => {
@@ -65,26 +67,40 @@ app.post('/register', upload.single('profilePic'), async (req, res) => {
   const { username, password, displayName } = req.body;
   const profilePic = req.file ? `/uploads/${req.file.filename}` : null;
 
-  if (users.find(u => u.username === username)) {
-    return res.render('register', { error: 'Username already exists' });
-  }
+  try {
+    const existing = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    if (existing.rows.length) {
+      return res.render('register', { error: 'Username already exists' });
+    }
 
-  const hashed = await bcrypt.hash(password, 10);
-  users.push({ username, password: hashed, displayName, profilePic });
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users));
-  res.redirect('/login');
+    const hashed = await bcrypt.hash(password, 10);
+    await pool.query('INSERT INTO users (username, password, display_name, profile_pic) VALUES ($1, $2, $3, $4)',
+      [username, hashed, displayName, profilePic]);
+
+    res.redirect('/login');
+  } catch (err) {
+    console.error(err);
+    res.render('register', { error: 'Database error' });
+  }
 });
 
 app.get('/login', (req, res) => res.render('login', { error: null }));
 
 app.post('/login', async (req, res) => {
   const { username, password } = req.body;
-  const user = users.find(u => u.username === username);
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.render('login', { error: 'Invalid credentials' });
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    const user = result.rows[0];
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.render('login', { error: 'Invalid credentials' });
+    }
+
+    req.session.user = user;
+    res.redirect('/chat');
+  } catch (err) {
+    console.error(err);
+    res.render('login', { error: 'Database error' });
   }
-  req.session.user = user;
-  res.redirect('/chat');
 });
 
 app.get('/logout', (req, res) => {
@@ -119,21 +135,20 @@ app.get('/room/:id', (req, res) => {
   });
 });
 
-app.post('/upload', upload.single('media'), (req, res) => {
+app.post('/upload', upload.single('media'), async (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
-  res.json({ filePath: `/uploads/${req.file.filename}` });
+  const filePath = `/uploads/${req.file.filename}`;
+  try {
+    await pool.query('INSERT INTO media (file_path, uploaded_by) VALUES ($1, $2)',
+      [filePath, req.session.user?.username || 'anonymous']);
+    res.json({ filePath });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Upload failed');
+  }
 });
 
-// Real-time logic
-let connectedUsers = {};
-let rooms = {};
-let roomMessages = {};
-
-function findSocketByUsername(username) {
-  const socketId = connectedUsers[username];
-  return socketId ? io.sockets.sockets.get(socketId) : null;
-}
-
+// Socket.IO
 io.on('connection', (socket) => {
   socket.on('join-room', ({ roomId, username }) => {
     connectedUsers[username] = socket.id;
@@ -142,7 +157,6 @@ io.on('connection', (socket) => {
 
     if (room.approvedUsers.has(username)) {
       socket.join(roomId);
-
       if (!roomMessages[roomId]) roomMessages[roomId] = [];
       roomMessages[roomId].forEach(msg => socket.emit('message', msg));
 
@@ -168,7 +182,6 @@ io.on('connection', (socket) => {
     if (room && room.pending.has(username)) {
       room.pending.delete(username);
       room.approvedUsers.add(username);
-
       const userSocket = findSocketByUsername(username);
       if (userSocket) {
         userSocket.emit('approved', { roomId });
