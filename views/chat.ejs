@@ -1,192 +1,237 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Chat Room - <%= roomId %></title>
-  <link rel="stylesheet" href="/css/style.css">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: Arial, sans-serif; background: #f0f2f5; padding: 20px; }
-    #messages { border: 1px solid #ccc; height: 300px; overflow-y: scroll; padding: 10px; background: #fff; }
-    .msg { margin: 5px 0; }
-    .msg strong { color: #2d89ef; }
-    .profile-pic { width: 24px; height: 24px; border-radius: 50%; vertical-align: middle; margin-right: 5px; }
-    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); justify-content: center; align-items: center; z-index: 1000; }
-    .modal-content { background: white; padding: 20px; border-radius: 5px; text-align: center; }
-    .modal button { margin: 10px; padding: 5px 10px; }
-    .modal.show { display: flex; }
-  </style>
-</head>
-<body>
-  <div class="container">
-  <img src="/images/chit chats.png" alt="Chat Logo" style="height: 100px; width: 100px; border: 2px solid black; border-radius: 250px; ">
-  <h1>ChatBox</h1>
-  <h2>Room: <%= roomId %></h2>
-  <p>Welcome, <strong><%= user.displayName || user.username %></strong> 
-    <% if (user.profilePic) { %>
-      <img src="<%= user.profilePic %>" class="profile-pic">
-    <% } %>
-  </p>
+const express = require('express');
+const session = require('express-session');
+const SQLiteStore = require('connect-sqlite3')(session);
+const bcrypt = require('bcryptjs');
+const { Server } = require('socket.io');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 
-  <div id="messages"></div>
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
 
-  <form id="chat-form"  >
-     <div class="input-group">
-    <input id="msg" autocomplete="off" placeholder="Type a message..." />
-    <button>Send📩</button></div>
-  </form>
+// Ensure uploads directory exists
+const uploadsDir = path.join(__dirname, 'public/uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
 
-  <form id="media-form" enctype="multipart/form-data" >
-    <input type="file" id="media-input" name="media" accept="image/*,audio/*" hidden>
-    <button type="button" onclick="document.getElementById('media-input').click()">send image📎</button>
-     
-  </form>
- <button style=" background-color: #2d89ef;" id="record-btn">send voice🎤</button>
+const USERS_FILE = path.join(__dirname, 'users.json');
+let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : [];
 
-  <% if (isAdmin) { %>
-    <button id="close-room-btn">Close Room</button>
-  <% } %>
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, 'public/uploads/'),
+  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+});
+const upload = multer({ storage });
 
-  <!-- Approval Modal -->
-  <div id="approvalModal" class="modal">
-    <div class="modal-content">
-      <p id="approvalMessage">User wants to join</p>
-      <button id="approveBtn">Approve</button>
-      <button id="rejectBtn">Reject</button>
-    </div>
-  </div>
-  </div>
+app.set('view engine', 'ejs');
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
+app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
 
-  <script src="/socket.io/socket.io.js"></script>
-  <script>
-    const socket = io(window.location.origin);
-    const username = "<%= user.username %>";
-    const roomId = "<%= roomId %>";
-    const isAdmin = <%= isAdmin %>;
+app.use(session({
+  store: new SQLiteStore,
+  secret: 'secret-key',
+  resave: false,
+  saveUninitialized: false
+}));
 
-    // Join room
-    socket.emit('join-room', { roomId, username });
+let connectedUsers = {}; // { username: socket.id }
+let rooms = {}; // { roomId: { admin, approvedUsers: Set, pending: Set } }
+let roomMessages = {}; // { roomId: [ { user, text } ] }
 
-    const messages = document.getElementById('messages');
-    const form = document.getElementById('chat-form');
-    const input = document.getElementById('msg');
+app.get('/', (req, res) => {
+  if (req.session.user) return res.redirect('/chat');
+  res.redirect('/login');
+});
 
-    // Load existing messages from localStorage (in-memory simulation)
-    const stored = sessionStorage.getItem('chat_' + roomId);
-    if (stored) messages.innerHTML = stored;
+app.get('/register', (req, res) => res.render('register', { error: null }));
 
-    // Receive message
-    socket.on('message', data => {
-      const item = document.createElement('div');
-      item.classList.add('msg');
-      item.innerHTML = `<strong>${data.user}:</strong> ${data.text}`;
-      messages.appendChild(item);
-      messages.scrollTop = messages.scrollHeight;
-      sessionStorage.setItem('chat_' + roomId, messages.innerHTML);
-    });
+app.post('/register', upload.single('profilePic'), async (req, res) => {
+  const { username, password, displayName } = req.body;
+  const profilePic = req.file ? `/uploads/${req.file.filename}` : null;
 
-    // Send message
-    form.addEventListener('submit', e => {
-      e.preventDefault();
-      const msg = input.value.trim();
-      if (msg) {
-        socket.emit('chat-message', msg);
-        input.value = '';
-      }
-    });
+  if (users.find(u => u.username === username)) {
+    return res.render('register', { error: 'Username already exists' });
+  }
 
-    // Media upload
-    const mediaInput = document.getElementById('media-input');
-    const mediaForm = document.getElementById('media-form');
+  const hashed = await bcrypt.hash(password, 10);
+  users.push({ username, password: hashed, displayName, profilePic });
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users));
+  res.redirect('/login');
+});
 
-    mediaInput.addEventListener('change', () => {
-      const formData = new FormData(mediaForm);
-      fetch('/upload', {
-        method: 'POST',
-        body: formData
-      })
-      .then(res => res.json())
-      .then(data => {
-        const filePath = data.filePath;
-        const ext = filePath.split('.').pop();
-        let msg = '';
-        if (['jpg', 'jpeg', 'png', 'gif'].includes(ext)) {
-          msg = `<img src="${filePath}" style="max-width:200px;">`;
-        } else if (['mp3', 'wav', 'ogg', 'webm'].includes(ext)) {
-          msg = `<audio controls src="${filePath}"></audio>`;
-        }
-        if (msg) socket.emit('chat message', msg);
+app.get('/login', (req, res) => res.render('login', { error: null }));
+
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  const user = users.find(u => u.username === username);
+  if (!user || !(await bcrypt.compare(password, user.password))) {
+    return res.render('login', { error: 'Invalid credentials' });
+  }
+  req.session.user = user;
+  res.redirect('/chat');
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy();
+  res.redirect('/');
+});
+
+app.get('/chat', (req, res) => {
+  if (!req.session.user) return res.redirect('/login');
+  res.render('index', { user: req.session.user });
+});
+
+app.get('/room/:id', (req, res) => {
+  const currentUser = req.session.user;
+  if (!currentUser) return res.redirect('/login');
+
+  const roomId = req.params.id;
+  if (!rooms[roomId]) {
+    rooms[roomId] = {
+      admin: currentUser.username,
+      approvedUsers: new Set([currentUser.username]),
+      pending: new Set()
+    };
+  }
+
+  const isAdmin = rooms[roomId].admin === currentUser.username;
+
+  res.render('chat', {
+    roomId,
+    user: currentUser,
+    isAdmin
+  });
+});
+
+app.post('/upload', upload.single('media'), (req, res) => {
+  if (!req.file) return res.status(400).send('No file uploaded.');
+  res.json({ filePath: '/uploads/' + req.file.filename });
+});
+
+function findSocketByUsername(username) {
+  const socketId = connectedUsers[username];
+  return socketId ? io.sockets.sockets.get(socketId) : null;
+}
+
+io.on('connection', socket => {
+  socket.on('join-room', ({ roomId, username }) => {
+    connectedUsers[username] = socket.id;
+    const room = rooms[roomId];
+    if (!room) return;
+
+    if (room.approvedUsers.has(username)) {
+      socket.join(roomId);
+
+      if (!roomMessages[roomId]) roomMessages[roomId] = [];
+      roomMessages[roomId].forEach(msg => socket.emit('message', msg));
+
+      io.to(roomId).emit('message', {
+        user: 'System',
+        text: `${username} joined the room`
       });
-    });
 
-    // Voice recording
-    let mediaRecorder;
-    let audioChunks = [];
-    const recordBtn = document.getElementById('record-btn');
+      socket.data.username = username;
+      socket.data.roomId = roomId;
 
-    recordBtn.addEventListener('click', async () => {
-      if (mediaRecorder && mediaRecorder.state === "recording") {
-        mediaRecorder.stop();
-        recordBtn.textContent = "voice 🎤";
+    } else {
+      room.pending.add(username);
+      const adminSocket = findSocketByUsername(room.admin);
+      if (adminSocket) {
+        adminSocket.emit('join-request', { roomId, username });
+      }
+    }
+  });
+
+  socket.on('approve-user', ({ roomId, username }) => {
+    const room = rooms[roomId];
+    if (room && room.pending.has(username)) {
+      room.pending.delete(username);
+      room.approvedUsers.add(username);
+
+      const userSocket = findSocketByUsername(username);
+      if (userSocket) {
+        userSocket.emit('approved', { roomId });
+      }
+    }
+  });
+
+  socket.on('reject-user', ({ roomId, username }) => {
+    const room = rooms[roomId];
+    if (room && room.pending.has(username)) {
+      room.pending.delete(username);
+      const userSocket = findSocketByUsername(username);
+      if (userSocket) {
+        userSocket.emit('rejected');
+      }
+    }
+  });
+
+  socket.on('chat-message', (msg) => {
+    const username = socket.data.username;
+    const roomId = socket.data.roomId;
+    if (!username || !roomId || !rooms[roomId]?.approvedUsers.has(username)) return;
+
+    const message = { user: username, text: msg };
+    roomMessages[roomId].push(message);
+    io.to(roomId).emit('message', message);
+  });
+
+  socket.on('chat message', (html) => {
+    const username = socket.data.username;
+    const roomId = socket.data.roomId;
+    if (!username || !roomId || !rooms[roomId]?.approvedUsers.has(username)) return;
+
+    const message = { user: username, text: html };
+    roomMessages[roomId].push(message);
+    io.to(roomId).emit('message', message);
+  });
+
+  socket.on('close-room', (roomId) => {
+    const username = Object.keys(connectedUsers).find(name => connectedUsers[name] === socket.id);
+    const room = rooms[roomId];
+    if (room && room.admin === username) {
+      io.to(roomId).emit('message', { user: 'System', text: `Room "${roomId}" has been closed` });
+      io.to(roomId).emit('room-closed');
+      delete rooms[roomId];
+      delete roomMessages[roomId];
+    }
+  });
+
+  socket.on('disconnect', () => {
+    const username = socket.data.username;
+    const roomId = socket.data.roomId;
+
+    if (roomId && rooms[roomId]) {
+      const room = rooms[roomId];
+      if (room.admin === username) {
+        io.to(roomId).emit('message', {
+          user: 'System',
+          text: `Room "${roomId}" has been closed`
+        });
+        io.to(roomId).emit('room-closed');
+        delete rooms[roomId];
+        delete roomMessages[roomId];
       } else {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream);
-        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-        mediaRecorder.onstop = () => {
-          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-          audioChunks = [];
-          const formData = new FormData();
-          formData.append('media', audioBlob, 'voice.webm');
-          fetch('/upload', {
-            method: 'POST',
-            body: formData
-          })
-          .then(res => res.json())
-          .then(data => {
-            const audioURL = data.filePath;
-            socket.emit('chat message', `<audio controls src="${audioURL}"></audio>`);
-          });
-        };
-        mediaRecorder.start();
-        recordBtn.textContent = "⏹️ Recording...";
+        io.to(roomId).emit('message', {
+          user: 'System',
+          text: `${username} left the room`
+        });
       }
-    });
-
-    // Admin approves join requests via modal popup
-    if (isAdmin) {
-      socket.on('join-request', ({ roomId, username }) => {
-        const modal = document.getElementById('approvalModal');
-        const message = document.getElementById('approvalMessage');
-        const approveBtn = document.getElementById('approveBtn');
-        const rejectBtn = document.getElementById('rejectBtn');
-
-        message.textContent = `User "${username}" wants to join the room. Approve?`;
-        modal.classList.add('show');
-
-        approveBtn.onclick = () => {
-          socket.emit('approve-user', { roomId, username });
-          modal.classList.remove('show');
-        };
-
-        rejectBtn.onclick = () => {
-          socket.emit('reject-user', { roomId, username });
-          modal.classList.remove('show');
-        };
-      });
     }
 
-    // Close room
-    document.getElementById('close-room-btn')?.addEventListener('click', () => {
-      if (confirm('Are you sure you want to close this room?')) {
-        socket.emit('close-room', roomId);
-      }
-    });
+    delete connectedUsers[username];
+  });
+});
 
-    socket.on('room-closed', () => {
-      alert("Room has been closed by the admin.");
-      sessionStorage.removeItem('chat_' + roomId);
-      window.location.href = '/chat';
-    });
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`✅ Server running at http://localhost:${PORT}`);
+});
 
-  </script>
-</body>
-</html>
+
