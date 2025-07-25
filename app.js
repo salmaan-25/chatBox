@@ -1,5 +1,6 @@
 const express = require('express');
 const session = require('express-session');
+const SQLiteStore = require('connect-sqlite3')(session);
 const bcrypt = require('bcryptjs');
 const { Server } = require('socket.io');
 const http = require('http');
@@ -9,32 +10,50 @@ const multer = require('multer');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+  cors: {
+    origin: "*", // Adjust to your frontend URL if needed
+    methods: ["GET", "POST"]
+  }
+});
+
+// Ensure uploads directory exists
+const uploadsDir = path.join(__dirname, 'public/uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
 const USERS_FILE = path.join(__dirname, 'users.json');
 let users = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE)) : [];
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'public/uploads/'),
+  destination: (req, file, cb) => cb(null, uploadsDir),
   filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
 });
 const upload = multer({ storage });
 
+// View & Middleware
 app.set('view engine', 'ejs');
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static('public'));
+app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+
+// Sessions
 app.use(session({
+  store: new SQLiteStore(),
   secret: 'secret-key',
   resave: false,
-  saveUninitialized: true,
+  saveUninitialized: false
 }));
 
-let connectedUsers = {}; // { username: socket.id }
-let rooms = {}; // { roomId: { admin, approvedUsers: Set, pending: Set } }
-let roomMessages = {}; // { roomId: [ { user, text } ] }
+// Force HTTPS (Render specific fix)
+app.use((req, res, next) => {
+  if (req.headers['x-forwarded-proto'] !== 'https' && process.env.NODE_ENV === 'production') {
+    return res.redirect('https://' + req.headers.host + req.url);
+  }
+  next();
+});
 
+// Routes
 app.get('/', (req, res) => {
   if (req.session.user) return res.redirect('/chat');
   res.redirect('/login');
@@ -102,15 +121,20 @@ app.get('/room/:id', (req, res) => {
 
 app.post('/upload', upload.single('media'), (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded.');
-  res.json({ filePath: '/uploads/' + req.file.filename });
+  res.json({ filePath: `/uploads/${req.file.filename}` });
 });
+
+// Real-time logic
+let connectedUsers = {};
+let rooms = {};
+let roomMessages = {};
 
 function findSocketByUsername(username) {
   const socketId = connectedUsers[username];
   return socketId ? io.sockets.sockets.get(socketId) : null;
 }
 
-io.on('connection', socket => {
+io.on('connection', (socket) => {
   socket.on('join-room', ({ roomId, username }) => {
     connectedUsers[username] = socket.id;
     const room = rooms[roomId];
@@ -127,7 +151,6 @@ io.on('connection', socket => {
         text: `${username} joined the room`
       });
 
-      // Store roomId and username for later use in message events
       socket.data.username = username;
       socket.data.roomId = roomId;
 
@@ -185,7 +208,7 @@ io.on('connection', socket => {
   });
 
   socket.on('close-room', (roomId) => {
-    const username = Object.keys(connectedUsers).find(name => connectedUsers[name] === socket.id);
+    const username = socket.data.username;
     const room = rooms[roomId];
     if (room && room.admin === username) {
       io.to(roomId).emit('message', { user: 'System', text: `Room "${roomId}" has been closed` });
@@ -198,7 +221,6 @@ io.on('connection', socket => {
   socket.on('disconnect', () => {
     const username = socket.data.username;
     const roomId = socket.data.roomId;
-
     if (roomId && rooms[roomId]) {
       const room = rooms[roomId];
       if (room.admin === username) {
@@ -216,12 +238,11 @@ io.on('connection', socket => {
         });
       }
     }
-
     delete connectedUsers[username];
   });
 });
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`✅ Server running at http://localhost:${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
