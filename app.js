@@ -13,13 +13,15 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+const { Pool } = require('pg');
+
 const pool = new Pool({
-  user: 'postgres',
-  host: 'localhost',
-  database: 'grpchat',
-  password: 'salmaan@2004',
-  port: 5432
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false  // Required for PostgreSQL on Render
+  }
 });
+
 
 // Middleware
 app.set('view engine', 'ejs');
