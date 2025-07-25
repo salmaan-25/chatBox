@@ -137,17 +137,26 @@ app.get('/room/:id', (req, res) => {
 });
 
 app.post('/upload', upload.single('media'), async (req, res) => {
-  if (!req.file) return res.status(400).send('No file uploaded.');
-  const filePath = `/uploads/${req.file.filename}`;
   try {
-    await pool.query('INSERT INTO media (file_path, uploaded_by) VALUES ($1, $2)',
-      [filePath, req.session.user?.username || 'anonymous']);
+    if (!req.file) return res.status(400).send('No file uploaded.');
+
+    const filePath = `/uploads/${req.file.filename}`;
+    const fileType = req.file.mimetype.split('/')[0]; // 'image', 'audio'
+    const username = req.session.user?.username;
+
+    // Insert into DB
+    await pool.query(
+      'INSERT INTO media (username, file_path, file_type) VALUES ($1, $2, $3)',
+      [username, filePath, fileType]
+    );
+
     res.json({ filePath });
   } catch (err) {
-    console.error(err);
-    res.status(500).send('Upload failed');
+    console.error("Error saving media to DB:", err);
+    res.status(500).send("Failed to upload file.");
   }
 });
+
 
 // Socket.IO
 io.on('connection', (socket) => {
